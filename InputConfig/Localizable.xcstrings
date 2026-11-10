@@ -201443,6 +201443,7 @@
       }
     },
     "Every controller byte is checked against the maker's protocol or the Linux and SDL drivers, and a built-in test bench replays those reports through every decoder" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -309477,6 +309478,7 @@
       }
     },
     "Menu bar: the emergency stop names only the holds that apply to the controllers connected" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -561512,6 +561514,7 @@
       }
     },
     "The donation window has no title bar buttons, and two larger tips join the list" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {

@@ -72,6 +72,9 @@ final class TestBenchService: ObservableObject {
         await runMIDILoopbackTest()
         await runSteamControllerSimulationTest()
         await runKeyboardOutputLoopbackTest()
+        #if DEBUG
+        runModifierChordTests()
+        #endif
         runHardwareSnapshot()
 
         let passed = results.filter { $0.status == .pass }.count
@@ -2230,6 +2233,114 @@ final class TestBenchService: ObservableObject {
              "How to verify end-to-end delivery",
              detail: "In-process verification is unreliable: macOS doesn't deliver self-posted HID events back through a same-process session tap (so a CGEventTap listener won't see them), and CGEventSource.counterForEventType deadlocks on the SkyLight subsystem when called from a sandboxed app. To prove cross-app keystrokes work, the only valid test is: open TextEdit with text, activate the Desktop Navigation preset, plug in a controller, press D-pad Up, and the text cursor should move.")
     }
+
+    #if DEBUG
+    // MARK: - Modifier / Chord Scope Tests
+
+    /// Drives `InputSimulator` the same way `MappingEngine.fireOutputs` does,
+    /// with `debugEventSink` swallowing every event so nothing reaches the
+    /// system and no Accessibility permission is needed. The shape under test
+    /// is the user's preset: a standalone LB → Right Command row, a plain
+    /// B → Backspace row, and an LB+B → Forward Delete chord whose outputs
+    /// name no modifier. Before the chord-row flag existed, the last row was
+    /// indistinguishable from a plain row and left as Command Forward Delete,
+    /// which most apps treat as "delete to end of line" - looking like a dead
+    /// button.
+    private func runModifierChordTests() {
+        let cat = "Modifier Chords"
+        let sim = InputSimulator.shared
+        // HID usages: 231 Right Command (LB standalone), 230 Right Option
+        // (RB standalone), 227 Left Command (inside a self-contained chord),
+        // 76 Forward Delete, 58 F1, 42 Backspace.
+        let cmdR = 231, optR = 230, cmdL = 227, fwdDelete = 76, f1 = 58, backspace = 42
+        var captured: [CGEvent] = []
+        InputSimulator.debugEventSink = { event in
+            if event.type == .keyDown { captured.append(event) }
+        }
+        // Every press is released with the same owner; the defer is a safety
+        // net so a failed assertion can never leave a synthetic key held.
+        defer {
+            InputSimulator.debugEventSink = nil
+            sim.keyUp(fwdDelete, owner: "t:chord-lb-b")
+            sim.keyUp(backspace, owner: "t:plain-b")
+            sim.keyUp(f1, owner: "t:chord-f1")
+            sim.keyUp(cmdL, owner: "t:chord-f1")
+            sim.keyUp(cmdR, owner: "t:standalone")
+            sim.keyUp(optR, owner: "t:standalone-opt")
+        }
+
+        // 1. The reported bug: LB held (standalone Command), then the LB+B
+        // chord whose only output is Forward Delete. The key must go out bare.
+        sim.keyDown(cmdR, owner: "t:standalone")
+        captured.removeAll()
+        sim.keyDown(fwdDelete, chord: [fwdDelete], owner: "t:chord-lb-b", isChordRow: true)
+        if let e = captured.last {
+            let leaked = e.flags.contains(.maskCommand)
+            record(cat,
+                   "LB+B chord (no modifier output) sends plain Forward Delete",
+                   pass: !leaked,
+                   detail: "keyDown flags=0x\(String(e.flags.rawValue, radix: 16)); Command \(leaked ? "leaked in (Command Forward Delete = delete to end of line)" : "absent, as intended")")
+        } else {
+            record(cat, "LB+B chord (no modifier output) sends plain Forward Delete", pass: false,
+                   detail: "no keyDown event captured")
+        }
+        sim.keyUp(fwdDelete, owner: "t:chord-lb-b")
+
+        // 2. Regression guard for the modifier layer: a plain row still picks
+        // up a Command held on its own, the way a physical Command hold does.
+        captured.removeAll()
+        sim.keyDown(backspace, chord: [backspace], owner: "t:plain-b")
+        if let e = captured.last {
+            let hasCmd = e.flags.contains(.maskCommand)
+            record(cat,
+                   "Plain row still picks up standalone Command (Cmd+Tab/Cmd+right-click layer)",
+                   pass: hasCmd,
+                   detail: "keyDown flags=0x\(String(e.flags.rawValue, radix: 16)); Command \(hasCmd ? "present, as intended" : "missing")")
+        } else {
+            record(cat, "Plain row still picks up standalone Command", pass: false,
+                   detail: "no keyDown event captured")
+        }
+        sim.keyUp(backspace, owner: "t:plain-b")
+        sim.keyUp(cmdR, owner: "t:standalone")
+
+        // 3. Fix-one guard: a self-contained Command+F1 chord pressed while
+        // Option is held standalone must carry its own Command but not the
+        // standalone Option (Cmd+Option+F1 matched nothing in most apps).
+        sim.keyDown(optR, owner: "t:standalone-opt")
+        sim.keyDown(cmdL, chord: [cmdL, f1], owner: "t:chord-f1", isChordRow: true)
+        captured.removeAll()
+        sim.keyDown(f1, chord: [cmdL, f1], owner: "t:chord-f1", isChordRow: true)
+        if let e = captured.last {
+            let hasCmd = e.flags.contains(.maskCommand)
+            let leakedOpt = e.flags.contains(.maskAlternate)
+            record(cat,
+                   "Self-contained Cmd+F1 chord keeps its Command, rejects standalone Option",
+                   pass: hasCmd && !leakedOpt,
+                   detail: "keyDown flags=0x\(String(e.flags.rawValue, radix: 16)); Command \(hasCmd ? "present" : "missing"), Option \(leakedOpt ? "leaked in" : "absent, as intended")")
+        } else {
+            record(cat, "Self-contained Cmd+F1 chord keeps its Command, rejects standalone Option",
+                   pass: false, detail: "no keyDown event captured")
+        }
+        sim.keyUp(f1, owner: "t:chord-f1")
+        sim.keyUp(cmdL, owner: "t:chord-f1")
+        sim.keyUp(optR, owner: "t:standalone-opt")
+
+        // 4. Baseline: nothing held standalone, a plain row sends a bare key.
+        captured.removeAll()
+        sim.keyDown(backspace, chord: [backspace], owner: "t:plain-b")
+        if let e = captured.last {
+            let clean = e.flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).isEmpty
+            record(cat,
+                   "Plain row with no modifier held sends a bare key",
+                   pass: clean,
+                   detail: "keyDown flags=0x\(String(e.flags.rawValue, radix: 16))")
+        } else {
+            record(cat, "Plain row with no modifier held sends a bare key", pass: false,
+                   detail: "no keyDown event captured")
+        }
+        sim.keyUp(backspace, owner: "t:plain-b")
+    }
+    #endif
 
     // MARK: - Hardware Snapshot
 

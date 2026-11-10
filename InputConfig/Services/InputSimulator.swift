@@ -99,6 +99,12 @@ final class InputSimulator: @unchecked Sendable {
     /// that does not say (the test bench, drive mode), which keeps the old
     /// rule of taking every held modifier.
     private var keyScopes: [Int: Set<Int>] = [:]
+    /// Keys currently held by a chord row (a row with modifier inputs), even
+    /// when that row names no modifier in its own outputs. Without this, an
+    /// LB+B → Forward Delete row was indistinguishable from a plain B row:
+    /// both arrived with an empty scope, and the standalone LB→Command bled
+    /// onto Forward Delete, sending Command Forward Delete instead.
+    private var chordRowKeys: Set<Int> = []
 
     /// Press a key.
     ///
@@ -214,12 +220,16 @@ final class InputSimulator: @unchecked Sendable {
         }
     }
 
-    func keyDown(_ hidCode: Int, chord: [Int]? = nil, owner: String = "", repeats: Bool = false) {
+    func keyDown(_ hidCode: Int, chord: [Int]? = nil, owner: String = "", repeats: Bool = false,
+                 isChordRow: Bool = false) {
         watchLayout()
         keyHolders[hidCode, default: []].insert(owner)
         let isModifier = modifierFlags(for: hidCode) != nil
         if repeats && !isModifier { repeatOwners[hidCode, default: []].insert(owner) }
         let scope: Set<Int>? = chord.map { Set($0.filter { self.modifierFlags(for: $0) != nil }) }
+        // A chord row whose outputs contain no modifier still owns its key
+        // alone: standalone modifier-layer shoulders must not bleed in.
+        if isChordRow { chordRowKeys.insert(hidCode) } else { chordRowKeys.remove(hidCode) }
         // A modifier held by a switcher shortcut (Command Tab, Command `)
         // lends itself like one held alone: holding the switcher open and
         // pressing arrows or Return on other buttons is how it is used, and
@@ -250,10 +260,10 @@ final class InputSimulator: @unchecked Sendable {
                 return
             }
             postPlainKey(postedKeys[hidCode] ?? self.virtualCode(for: hidCode, scope: keyScopes[hidCode]) ?? virtualCode, down: false,
-                         modifiers: scopedModifierFlags(keyScopes[hidCode]))
+                         modifiers: scopedModifierFlags(keyScopes[hidCode], isChordRow: chordRowKeys.contains(hidCode)))
             keyScopes[hidCode] = scope
             postedKeys[hidCode] = virtualCode
-            postPlainKey(virtualCode, down: true, modifiers: scopedModifierFlags(scope))
+            postPlainKey(virtualCode, down: true, modifiers: scopedModifierFlags(scope, isChordRow: isChordRow))
             return
         }
         pressedKeys.insert(hidCode)
@@ -272,7 +282,7 @@ final class InputSimulator: @unchecked Sendable {
                 postModifierChange(virtualCode, down: true)
             } else {
                 postedKeys[hidCode] = virtualCode
-                postPlainKey(virtualCode, down: true, modifiers: scopedModifierFlags(scope))
+                postPlainKey(virtualCode, down: true, modifiers: scopedModifierFlags(scope, isChordRow: isChordRow))
                 if repeats { startRepeat(hidCode, virtualCode: virtualCode) }
             }
         } else {
@@ -314,7 +324,8 @@ final class InputSimulator: @unchecked Sendable {
                 self?.stopRepeat(hidCode)
                 return
             }
-            var flags = self.scopedModifierFlags(self.keyScopes[hidCode])
+            var flags = self.scopedModifierFlags(self.keyScopes[hidCode],
+                                                 isChordRow: self.chordRowKeys.contains(hidCode))
             flags.formUnion(self.keyOwnFlagBits(current))
             flags.insert(.maskNonCoalesced)
             event.flags = flags
@@ -351,6 +362,7 @@ final class InputSimulator: @unchecked Sendable {
         repeatOwners.removeValue(forKey: hidCode)
         stopRepeat(hidCode)
         pressedKeys.remove(hidCode)
+        let wasChordRow = chordRowKeys.remove(hidCode) != nil
         let isModifier = modifierFlags(for: hidCode) != nil
         if isModifier { standaloneModifiers.removeValue(forKey: hidCode) }
         let scope = keyScopes.removeValue(forKey: hidCode)
@@ -372,7 +384,8 @@ final class InputSimulator: @unchecked Sendable {
             } else {
                 // Carry the modifiers of its own row that are still held, so
                 // releasing the C of Command C does not read as a bare key-up.
-                postPlainKey(virtualCode, down: false, modifiers: scopedModifierFlags(scope))
+                postPlainKey(virtualCode, down: false,
+                             modifiers: scopedModifierFlags(scope, isChordRow: wasChordRow))
             }
         } else {
             postSpecialKey(hidCode, keyDown: false)
@@ -382,7 +395,7 @@ final class InputSimulator: @unchecked Sendable {
     /// The modifier flags a key carries: every held modifier that belongs to
     /// its own row (`scope`) or is held on its own. A nil scope takes every
     /// held modifier, the rule for callers that do not say which row pressed.
-    private func scopedModifierFlags(_ scope: Set<Int>?) -> CGEventFlags {
+    private func scopedModifierFlags(_ scope: Set<Int>?, isChordRow: Bool = false) -> CGEventFlags {
         var flags: CGEventFlags = []
         // A modifier the person is holding on the keyboard (not this app).
         // Shift goes on every key, as on a real keyboard: a one-handed user
@@ -409,7 +422,25 @@ final class InputSimulator: @unchecked Sendable {
         if physical & CGEventFlags.maskAlphaShift.rawValue != 0 { flags.insert(.maskAlphaShift) }
         for code in pressedKeys {
             guard let f = modifierFlags(for: code) else { continue }
-            if let scope, !scope.contains(code), standaloneModifiers[code] == nil { continue }
+            if let scope {
+                if !scope.isEmpty || isChordRow {
+                    // A chord row names every modifier it wants in its own
+                    // outputs; a modifier held on its own (a modifier-layer
+                    // shoulder button) must not bleed in. This covers the row
+                    // whose outputs name no modifier at all (LB+B → Forward
+                    // Delete), which otherwise looked like a plain row and
+                    // picked up the standalone LB→Command, sending Command
+                    // Forward Delete. A self-contained Cmd+F1 row under a held
+                    // standalone Option likewise stays Cmd+F1, not
+                    // Cmd+Option+F1.
+                    guard scope.contains(code) else { continue }
+                } else if standaloneModifiers[code] == nil {
+                    // A plain row with no modifiers of its own still picks up
+                    // modifiers held on their own, the way a key does when
+                    // Command is physically held on a keyboard.
+                    continue
+                }
+            }
             flags.insert(f)
             // Which side, as a real keyboard's key events carry: apps that
             // tell Right Option from Left (iTerm2, VMs, remote desktops)
@@ -2015,7 +2046,8 @@ final class GlobalHotKeyService: @unchecked Sendable {
 final class InputSimulator: @unchecked Sendable {
     nonisolated(unsafe) static let shared = InputSimulator()
 
-    func keyDown(_ hidCode: Int, chord: [Int]? = nil, owner: String = "", repeats: Bool = false) {}
+    func keyDown(_ hidCode: Int, chord: [Int]? = nil, owner: String = "", repeats: Bool = false,
+                 isChordRow: Bool = false) {}
     func keyUp(_ hidCode: Int, owner: String = "") {}
     func mouseButtonDown(_ button: Int, owner: String = "", singleClick: Bool = false) {}
     func mouseButtonUp(_ button: Int, owner: String = "") {}

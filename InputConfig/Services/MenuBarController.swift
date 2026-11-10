@@ -234,10 +234,9 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         let visible = UserDefaults.standard.object(forKey: Self.defaultsKey) as? Bool ?? true
         item.isVisible = visible
 
-        // Live cue: the glyph is a normal template icon while idle (adaptive
-        // to the menu bar's light/dark) and swaps to a solid green glyph while
-        // a preset is running. A green *template tint* rendered black on some
-        // menu bars, so we bake a real green, non-template image instead.
+        // Live cue: the glyph is a hollow outline while idle and swaps to the
+        // solid glyph while a preset is running. Both are template images, so
+        // the menu bar tints them like any other icon - no color involved.
         mappingEngine.$isRunning
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
@@ -385,68 +384,74 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         return (symbol, NSSize(width: w.rounded(), height: h))
     }
 
-    /// The menu bar glyph (the app's own controller artwork). Idle: template
-    /// (system tints it for the menu bar). Running: a solid green,
-    /// non-template copy so "mappings on" reads at a glance. Because a colored
-    /// (non-template) image does not auto-invert, the green shade is chosen
-    /// from the menu bar's light/dark appearance: a bright system green on a
-    /// dark bar, a deeper forest green on a light bar, so it stays legible
-    /// either way, like the way macOS menu bar icons adapt.
+    /// The menu bar glyph (the app's own controller artwork). State reads by
+    /// shape, not color: idle is a hollow outline of the glyph, running is
+    /// the solid glyph as a template image (the system tints it for the menu
+    /// bar, so it auto-inverts like any other menu bar icon). The one color
+    /// left is the warning case: running but blocked by missing
+    /// Accessibility stays orange with a "!" dot.
     private static func makeMenuBarImage(running: Bool,
                                          blocked: Bool = false,
                                          appearance: NSAppearance) -> NSImage? {
         guard let (base, size) = baseImage(for: iconChoice) else { return nil }
-        if running {
+        if running && blocked {
             let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            let fill: NSColor = blocked
-                ? (isDark ? NSColor.systemOrange : NSColor(srgbRed: 0.72, green: 0.36, blue: 0.0, alpha: 1.0))
-                : isDark
-                ? NSColor.systemGreen
-                : NSColor(srgbRed: 0.11, green: 0.44, blue: 0.17, alpha: 1.0)
-            let green = NSImage(size: size, flipped: false) { rect in
+            let fill: NSColor = isDark
+                ? NSColor.systemOrange
+                : NSColor(srgbRed: 0.72, green: 0.36, blue: 0.0, alpha: 1.0)
+            let warning = NSImage(size: size, flipped: false) { rect in
                 fill.setFill()
                 rect.fill()
                 base.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1.0)
-                // Blocked is orange and also carries a small "!" dot, so it
-                // does not rest on telling orange from green.
-                if blocked {
-                    let d = min(rect.width, rect.height) * 0.42
-                    let dot = NSRect(x: rect.maxX - d, y: rect.maxY - d, width: d, height: d)
-                    fill.setFill()
-                    NSBezierPath(ovalIn: dot).fill()
-                    NSColor.white.setFill()
-                    let bar = NSRect(x: dot.midX - d * 0.07, y: dot.minY + d * 0.38, width: d * 0.14, height: d * 0.42)
-                    NSBezierPath(rect: bar).fill()
-                    NSBezierPath(ovalIn: NSRect(x: dot.midX - d * 0.08, y: dot.minY + d * 0.14, width: d * 0.16, height: d * 0.16)).fill()
-                } else if NSWorkspace.shared.accessibilityDisplayShouldDifferentiateWithoutColor {
-                    // Running is green; with Differentiate Without Color it
-                    // also carries a small play mark, as blocked has its "!".
-                    let d = min(rect.width, rect.height) * 0.42
-                    let dot = NSRect(x: rect.maxX - d, y: rect.maxY - d, width: d, height: d)
-                    fill.setFill()
-                    NSBezierPath(ovalIn: dot).fill()
-                    NSColor.white.setFill()
-                    let tri = NSBezierPath()
-                    tri.move(to: NSPoint(x: dot.minX + d * 0.36, y: dot.minY + d * 0.26))
-                    tri.line(to: NSPoint(x: dot.minX + d * 0.36, y: dot.maxY - d * 0.26))
-                    tri.line(to: NSPoint(x: dot.maxX - d * 0.26, y: dot.midY))
-                    tri.close()
-                    tri.fill()
-                }
+                // Orange plus a small "!" dot, so the warning does not rest
+                // on color alone.
+                let d = min(rect.width, rect.height) * 0.42
+                let dot = NSRect(x: rect.maxX - d, y: rect.maxY - d, width: d, height: d)
+                fill.setFill()
+                NSBezierPath(ovalIn: dot).fill()
+                NSColor.white.setFill()
+                let bar = NSRect(x: dot.midX - d * 0.07, y: dot.minY + d * 0.38, width: d * 0.14, height: d * 0.42)
+                NSBezierPath(rect: bar).fill()
+                NSBezierPath(ovalIn: NSRect(x: dot.midX - d * 0.08, y: dot.minY + d * 0.14, width: d * 0.16, height: d * 0.16)).fill()
                 return true
             }
-            green.isTemplate = false
-            green.accessibilityDescription = blocked
-                ? String(localized: "InputConfig (running, Accessibility is off)")
-                : String(localized: "InputConfig (running)")
-            return green
-        } else {
-            let template = base.copy() as? NSImage
-            template?.isTemplate = true
-            template?.size = size
-            template?.accessibilityDescription = "InputConfig"
-            return template
+            warning.isTemplate = false
+            warning.accessibilityDescription = String(localized: "InputConfig (running, Accessibility is off)")
+            return warning
         }
+        let glyph = running ? base.copy() as? NSImage : outlinedGlyph(base: base, size: size)
+        glyph?.isTemplate = true
+        glyph?.size = size
+        glyph?.accessibilityDescription = running ? String(localized: "InputConfig (running)") : "InputConfig"
+        return glyph
+    }
+
+    /// The hollow, stroke-only version of the glyph for the idle state.
+    /// SF Symbols use their native outline variant when one exists; anything
+    /// else (the app's own controller artwork, symbols with no outline
+    /// variant) gets a generated outline: the glyph stamped around a small
+    /// circle with the original punched out, leaving a ring.
+    private static func outlinedGlyph(base: NSImage, size: NSSize) -> NSImage? {
+        let symbolName = iconChoice.symbol
+        let outlineName = symbolName.replacingOccurrences(of: ".fill", with: "")
+        if iconChoice != .controller, outlineName != symbolName {
+            let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+            if let outline = NSImage(systemSymbolName: outlineName, accessibilityDescription: nil)?
+                .withSymbolConfiguration(config) {
+                return outline
+            }
+        }
+        let ring = NSImage(size: size, flipped: false) { rect in
+            let radius: CGFloat = 1.0
+            for i in 0..<8 {
+                let angle = CGFloat(i) * .pi / 4
+                let offset = rect.offsetBy(dx: cos(angle) * radius, dy: sin(angle) * radius)
+                base.draw(in: offset, from: .zero, operation: .sourceOver, fraction: 1.0)
+            }
+            base.draw(in: rect, from: .zero, operation: .destinationOut, fraction: 1.0)
+            return true
+        }
+        return ring
     }
 
     /// Show or hide the status item without removing it. Safe to call from

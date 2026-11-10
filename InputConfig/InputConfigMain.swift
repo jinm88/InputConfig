@@ -1784,6 +1784,11 @@ struct InputConfig: App {
                 }
                 .keyboardShortcut("p", modifiers: [.command, .option])
 
+                Button("Reload Presets") {
+                    MenuBarController.shared.postToMainWindow(.inputConfigReloadPresets)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option])
+
                 Button("Stop All Activity") {
                     appState.mappingEngine.stop()
                     appState.presetStore.deactivateAll()

@@ -2526,9 +2526,11 @@ class MappingEngine: ObservableObject {
                                 // What is stacked beside the macro (Type Text,
                                 // a System Function) fires from the same press,
                                 // as Help says.
-                                fireOutputs(binding.outputs, press: true, inputIsAxis: inputIsAxis, owner: bindKey)
+                                fireOutputs(binding.outputs, press: true, inputIsAxis: inputIsAxis, owner: bindKey,
+                                            isChordRow: !binding.modifiers.isEmpty)
                             } else if binding.turboEnabled != true {
-                                fireOutputs(binding.outputs, press: true, inputIsAxis: inputIsAxis, owner: bindKey)
+                                fireOutputs(binding.outputs, press: true, inputIsAxis: inputIsAxis, owner: bindKey,
+                                            isChordRow: !binding.modifiers.isEmpty)
                             } else {
                                 // The run's light bar color, once; the pulses
                                 // leave it out (see `turboPulseOutputs`).
@@ -2666,7 +2668,8 @@ class MappingEngine: ObservableObject {
                             fireWithRepeat(binding, bindKey: bindKey)
                         } else {
                             fireOutputs(binding.outputs, press: true, inputIsAxis: inputIsAxis, owner: bindKey,
-                                        repeats: binding.keyRepeat == true)
+                                        repeats: binding.keyRepeat == true,
+                                        isChordRow: !binding.modifiers.isEmpty)
                             if Self.isOneShot(binding.input) { nudgePointer(for: binding.outputs, owner: bindKey) }
                             // A gyro pointer row moves on its first frame too:
                             // the turn made then was dropped, so a short flick
@@ -3971,7 +3974,8 @@ class MappingEngine: ObservableObject {
         }
         let pulseOutputs = Self.turboPulseOutputs(binding.outputs)
         firingTurboPulse = true
-        fireOutputs(pulseOutputs, press: true, inputIsAxis: inputIsAxis, owner: bindKey)
+        fireOutputs(pulseOutputs, press: true, inputIsAxis: inputIsAxis, owner: bindKey,
+                    isChordRow: !binding.modifiers.isEmpty)
         firingTurboPulse = false
         turboCounts[bindKey] = fired + 1
         // Release after ~40% of the gap (capped so slow auto-clicks still
@@ -4093,7 +4097,8 @@ class MappingEngine: ObservableObject {
     /// (a row's bindKey, its hold action, its macro). A key another row
     /// still holds stays down when this owner lets go; see InputSimulator.
     private func fireOutputs(_ outputs: [OutputAction], press: Bool, inputIsAxis: Bool = false,
-                             owner: String = "", repeats: Bool = false, restingCCValue: Int? = nil) {
+                             owner: String = "", repeats: Bool = false, restingCCValue: Int? = nil,
+                             isChordRow: Bool = false) {
         // App actions run even while outputs are paused; otherwise a
         // controller-bound Pause / Resume binding could pause the engine and
         // never resume it. Hopped to main async because activating a preset
@@ -4186,7 +4191,8 @@ class MappingEngine: ObservableObject {
             case .key:
                 if let code = output.keyCode {
                     if press {
-                        InputSimulator.shared.keyDown(code, chord: chordKeys, owner: owner, repeats: repeats)
+                        InputSimulator.shared.keyDown(code, chord: chordKeys, owner: owner, repeats: repeats,
+                                                      isChordRow: isChordRow)
                     } else {
                         InputSimulator.shared.keyUp(code, owner: owner)
                     }

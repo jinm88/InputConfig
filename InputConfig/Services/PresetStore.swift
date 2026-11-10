@@ -1071,6 +1071,54 @@ class PresetStore: ObservableObject {
         migrateMissingSortOrderIfNeeded()
     }
 
+    /// Re-read every preset file from disk without losing the running
+    /// selection. `loadPresets()` clears all `isActive` flags, so a reload
+    /// driven by the Controller menu would silently stop the engine's
+    /// preset from being findable as "the active one". This remembers the
+    /// active preset id, reloads, then restores both the flag and the
+    /// persisted last-activated id, and posts `presetsReloadedNotification`
+    /// so the engine can swap its in-memory copy for the fresh one.
+    /// - Returns: the reloaded preset that is active, if it still exists.
+    @discardableResult
+    func reloadPresets() -> Preset? {
+        let previousActiveId = activePresetId
+            ?? presets.first(where: { $0.isActive })?.id
+        loadPresets()
+        var restored: Preset?
+        if let id = previousActiveId,
+           let match = presets.first(where: { $0.id == id }) {
+            var reactivated = match
+            reactivated.isActive = true
+            if let index = presets.firstIndex(where: { $0.id == id }) {
+                presets[index] = reactivated
+            }
+            activePresetId = id
+            UserDefaults.standard.set(id.uuidString, forKey: "InputConfig.lastActivatedPresetId")
+            restored = reactivated
+        } else {
+            activePresetId = nil
+        }
+        NotificationCenter.default.post(
+            name: Self.presetsReloadedNotification,
+            object: self,
+            userInfo: [Self.reloadActivePresetIdKey: previousActiveId as Any]
+        )
+        return restored
+    }
+
+    /// The first preset whose joystick mappings include `fingerprint`,
+    /// case-insensitive. Used to auto-activate a preset when its device
+    /// connects. Returns nil when no preset claims the device.
+    func preset(matchingDeviceFingerprint fingerprint: String) -> Preset? {
+        let needle = fingerprint.lowercased()
+        return presets.first { preset in
+            preset.joysticks.contains { mapping in
+                guard let fp = mapping.deviceFingerprint, !fp.isEmpty else { return false }
+                return fp.lowercased() == needle
+            }
+        }
+    }
+
     /// Sort by explicit position, then by recency for anything not yet placed.
     /// Ties break on name so the result is deterministic.
     static func inDisplayOrder(_ list: [Preset]) -> [Preset] {
@@ -1724,6 +1772,14 @@ class PresetStore: ObservableObject {
     /// Posted after every preset save, carrying the saved preset. MappingEngine
     /// listens so an edit to the RUNNING preset takes effect immediately.
     static let presetSavedNotification = Notification.Name("InputConfig.PresetSaved")
+
+    /// Posted after `reloadPresets()` re-reads every preset file from disk
+    /// (Controller > Reload Presets). userInfo carries the id of the preset
+    /// that stayed active under `reloadActivePresetIdKey`, when there was one.
+    static let presetsReloadedNotification = Notification.Name("InputConfig.PresetsReloaded")
+
+    /// userInfo key for `presetsReloadedNotification`.
+    static let reloadActivePresetIdKey = "activePresetId"
 
     func savePreset(_ preset: Preset, forceSnapshot: Bool = false) {
         var mutable = preset

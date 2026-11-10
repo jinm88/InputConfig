@@ -1330,6 +1330,17 @@ class GameControllerService: ObservableObject {
             // "disconnected" for the pad that was there.
             guard !departedNames.contains(controllerNames[slot] ?? "") else { continue }
             AccessibilityNotification.Announcement(String(localized: "\(controllerNames[slot] ?? String(localized: "Controller")) connected")).post()
+            // Let the app layer auto-activate a preset bound to this device.
+            // The fingerprint is the same string a preset stores in its
+            // joystick mapping's deviceFingerprint.
+            let fingerprint = self.deviceFingerprint(forSlot: slot)
+            if let fingerprint, !fingerprint.isEmpty {
+                NotificationCenter.default.post(
+                    name: .inputConfigDeviceDidConnect,
+                    object: self,
+                    userInfo: [inputConfigDeviceFingerprintKey: fingerprint]
+                )
+            }
         }
         // (The in-process LED writer was re-enumerated above, before the
         // per-slot light writes.)

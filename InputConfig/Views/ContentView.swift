@@ -19,6 +19,12 @@ extension Notification.Name {
     static let inputConfigNewPreset              = Notification.Name("InputConfig.NewPreset")
     static let inputConfigOpenSmartMaker         = Notification.Name("InputConfig.OpenSmartMaker")
     static let inputConfigToggleActivePreset     = Notification.Name("InputConfig.ToggleActive")
+    /// Controller > Reload Presets: re-read every preset JSON from disk.
+    static let inputConfigReloadPresets          = Notification.Name("InputConfig.ReloadPresets")
+    /// Posted by GameControllerService when a controller finishes
+    /// connecting. userInfo[`inputConfigDeviceFingerprintKey`] holds the
+    /// runtime device fingerprint used to match a preset to auto-activate.
+    static let inputConfigDeviceDidConnect       = Notification.Name("InputConfig.DeviceDidConnect")
     /// The Presets menu: an action on the selected preset or its folder, so
     /// everything the sidebar's right-click and ellipsis menus offer works
     /// from the keyboard and by voice. The object is a `SidebarCommand`.
@@ -49,11 +55,33 @@ extension Notification.Name {
     static let inputConfigExpandBindingOptions   = Notification.Name("InputConfig.ExpandBindingOptions")
 }
 
+/// userInfo key for `inputConfigDeviceDidConnect`: the runtime device
+/// fingerprint string of the just-connected controller.
+let inputConfigDeviceFingerprintKey = "deviceFingerprint"
+
 /// Takes the window's sheets down when the app is quitting.
 private struct QuitSheetCloser: ViewModifier {
     let close: () -> Void
     func body(content: Content) -> some View {
         content.onReceive(NotificationCenter.default.publisher(for: .inputConfigCloseSheetsForQuit)) { _ in close() }
+    }
+}
+
+/// Hot-reload (Controller > Reload Presets) and device-connect auto-activation.
+/// Kept in its own modifier because ContentView's body is already at the Swift
+/// type-checker's limit; two more inline onReceive blocks fail to compile.
+private struct PresetLifecycleObservers: ViewModifier {
+    let onReload: () -> Void
+    let onDeviceConnect: (Notification) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .inputConfigReloadPresets)) { _ in
+                onReload()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .inputConfigDeviceDidConnect)) { note in
+                onDeviceConnect(note)
+            }
     }
 }
 
@@ -504,6 +532,10 @@ struct ContentView: View {
                 AccessibilityNotification.Announcement(String(localized: "No preset selected")).post()
             }
         }
+        .modifier(PresetLifecycleObservers(
+            onReload: { reloadPresetsFromDisk() },
+            onDeviceConnect: { handleDeviceDidConnect($0) }
+        ))
         .onReceive(NotificationCenter.default.publisher(for: .inputConfigOpenTouchpadCalibration)) { _ in
             requestCalibration(touchpad: true)
         }
@@ -3772,6 +3804,38 @@ struct ContentView: View {
         accessibility.refresh()
         if !accessibility.isTrusted, presetUsesKeyboardOrMouse(preset) {
             showAccessibilityAlert = true
+        }
+    }
+
+    /// Controller > Reload Presets (and its shortcut): re-read every preset
+    /// file from disk so edits made outside the app take effect without a
+    /// restart. If a preset is currently running, the engine swaps its
+    /// in-memory copy for the freshly decoded one; otherwise the library just
+    /// refreshes. A preset file removed from disk stops the engine.
+    private func reloadPresetsFromDisk() {
+        let wasRunning = mappingEngine.isRunning
+        let runningID = mappingEngine.activePreset?.id ?? presetStore.activePresetId
+        let reloaded = presetStore.reloadPresets()
+        if wasRunning {
+            if let reloaded, reloaded.id == runningID {
+                mappingEngine.reload(with: reloaded)
+            } else {
+                mappingEngine.stop()
+            }
+        }
+    }
+
+    /// Auto-activate the preset bound to a controller that just connected.
+    /// Runs through the normal `startEngine` path so Accessibility prompts,
+    /// the restrictive-start check and engine teardown match a manual
+    /// activation. No matching preset, or the same preset already running,
+    /// means no change.
+    private func handleDeviceDidConnect(_ note: Notification) {
+        guard let fingerprint = note.userInfo?[inputConfigDeviceFingerprintKey] as? String,
+              !fingerprint.isEmpty,
+              let preset = presetStore.preset(matchingDeviceFingerprint: fingerprint) else { return }
+        if mappingEngine.activePreset?.id != preset.id {
+            startEngine(with: preset)
         }
     }
 
